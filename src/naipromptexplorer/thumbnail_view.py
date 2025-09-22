@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from bisect import bisect_left, bisect_right
 from collections import OrderedDict
+from math import ceil
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional
 
@@ -47,7 +47,7 @@ class ThumbnailItem(ttk.Frame):
     def __init__(
         self,
         parent: tk.Misc,
-        entry: ImageEntry,
+        entry: Optional[ImageEntry],
         cache: ThumbnailCache,
         size: int,
         on_select: Callable[[ImageEntry], None],
@@ -59,16 +59,19 @@ class ThumbnailItem(ttk.Frame):
         self.on_select = on_select
         self.selected = False
         self._has_thumbnail = False
+        self.current_row: Optional[int] = None
+        self.current_entry_index: Optional[int] = None
 
         self._image_label = ttk.Label(self)
-        self._name_label = ttk.Label(self, text=entry.file_name, wraplength=size, justify="center")
+        name = entry.file_name if entry else ""
+        self._name_label = ttk.Label(self, text=name, wraplength=size, justify="center")
         self._image_label.pack(expand=True, fill="both")
         self._name_label.pack(fill="x")
 
         self._bind_clicks()
 
     def ensure_thumbnail(self) -> None:
-        if self._has_thumbnail:
+        if self._has_thumbnail or not self.entry:
             return
         image = self.cache.get(self.entry.path, self.size)
         self._image_label.configure(image=image)
@@ -80,7 +83,8 @@ class ThumbnailItem(ttk.Frame):
             widget.bind("<Button-1>", self._on_click)
 
     def _on_click(self, _event: tk.Event) -> None:  # type: ignore[override]
-        self.on_select(self.entry)
+        if self.entry:
+            self.on_select(self.entry)
 
     def set_selected(self, selected: bool) -> None:
         self.selected = selected
@@ -92,6 +96,16 @@ class ThumbnailItem(ttk.Frame):
             self.size = size
             self._name_label.configure(wraplength=size)
             self.clear_thumbnail()
+
+    def set_entry(self, entry: Optional[ImageEntry]) -> None:
+        if entry is self.entry:
+            return
+        self.entry = entry
+        text = entry.file_name if entry else ""
+        self._name_label.configure(text=text)
+        self.clear_thumbnail()
+        if not entry:
+            self.set_selected(False)
 
     def clear_thumbnail(self) -> None:
         if not self._has_thumbnail:
@@ -115,11 +129,17 @@ class ThumbnailView(ttk.Frame):
         self.thumbnail_size = thumbnail_size
         self.on_select = on_select
         self._cache = ThumbnailCache()
+        self._entries: List[ImageEntry] = []
         self._items: List[ThumbnailItem] = []
-        self._pending: List[ImageEntry] = []
+        self._item_entries: List[Optional[int]] = []
         self._selected_path: Optional[Path] = None
-        self._item_tops: List[int] = []
-        self._item_bottoms: List[int] = []
+        self._visible_row = 0
+        self._row_height = thumbnail_size + 48
+        self._buffer_rows = 2
+        self._needs_rebind = True
+        self._measurement_job: Optional[str] = None
+        self._horizontal_padding = 4
+        self._vertical_padding = 4
 
         self.canvas = tk.Canvas(self, highlightthickness=0)
         self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self._on_scrollbar)
@@ -136,7 +156,6 @@ class ThumbnailView(ttk.Frame):
         for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
             self.canvas.bind(sequence, self._on_mousewheel)
             self.inner.bind(sequence, self._on_mousewheel)
-        self._batch_job_id: Optional[str] = None
 
     def _on_mousewheel(self, event: tk.Event) -> None:  # type: ignore[override]
         delta = 0
@@ -158,66 +177,54 @@ class ThumbnailView(ttk.Frame):
         self._update_visible_items()
 
     def _on_frame_configure(self, _event: tk.Event) -> None:  # type: ignore[override]
-        bbox = self.canvas.bbox(self._window_id)
-        if bbox is not None:
-            self.canvas.configure(scrollregion=bbox)
-        self._update_item_positions()
-        self._update_visible_items()
+        self._update_scrollregion()
 
     def _on_canvas_configure(self, event: tk.Event) -> None:  # type: ignore[override]
         self.canvas.itemconfigure(self._window_id, width=event.width)
-        self._update_item_positions()
+        self._needs_rebind = True
+        self._ensure_pool()
+        self._update_scrollregion()
         self._update_visible_items()
 
     def clear(self) -> None:
-        if self._batch_job_id is not None:
-            self.after_cancel(self._batch_job_id)
-            self._batch_job_id = None
+        if self._measurement_job is not None:
+            self.after_cancel(self._measurement_job)
+            self._measurement_job = None
 
         for item in self._items:
-            item.clear_thumbnail()
             item.destroy()
         self._items.clear()
-        self._pending.clear()
+        self._item_entries.clear()
+        self._entries.clear()
         self._selected_path = None
-        self._item_tops.clear()
-        self._item_bottoms.clear()
+        self._visible_row = 0
+        self._row_height = self.thumbnail_size + 48
+        self._needs_rebind = True
+        self.canvas.yview_moveto(0)
+        self._update_scrollregion()
 
     def set_entries(self, entries: Iterable[ImageEntry]) -> None:
-        self.clear()
-        self._pending = list(entries)
-        self._build_next_batch()
+        if self._measurement_job is not None:
+            self.after_cancel(self._measurement_job)
+            self._measurement_job = None
+
+        self._entries = list(entries)
+        if self._selected_path and not any(entry.path == self._selected_path for entry in self._entries):
+            self._selected_path = None
+        self.canvas.yview_moveto(0)
+        self._visible_row = 0
+        self._needs_rebind = True
+        self._ensure_pool()
+        self._update_scrollregion()
+        self._update_visible_items()
 
     def clear_cache(self) -> None:
         self._cache.clear()
 
-    def _build_next_batch(self, batch_size: int = 24) -> None:
-        if not self._pending:
-            self._batch_job_id = None
-            return
-        batch_count = min(batch_size, len(self._pending))
-        for _ in range(batch_count):
-            entry = self._pending.pop(0)
-            item = ThumbnailItem(
-                self.inner,
-                entry=entry,
-                cache=self._cache,
-                size=self.thumbnail_size,
-                on_select=self._handle_select,
-            )
-            index = len(self._items)
-            row = index // self.columns
-            column = index % self.columns
-            item.grid(row=row, column=column, padx=4, pady=4, sticky="nsew")
-            self._items.append(item)
-
-        self._batch_job_id = self.after(30, self._build_next_batch)
-        self.after_idle(self._refresh_visible_items)
-
     def _handle_select(self, entry: ImageEntry) -> None:
         self._selected_path = entry.path
         for item in self._items:
-            is_selected = item.entry.path == entry.path
+            is_selected = item.entry is not None and item.entry.path == entry.path
             item.set_selected(is_selected)
             if is_selected:
                 item.ensure_thumbnail()
@@ -228,7 +235,11 @@ class ThumbnailView(ttk.Frame):
         if columns == self.columns:
             return
         self.columns = columns
-        self._relayout_items()
+        self._visible_row = 0
+        self._needs_rebind = True
+        self._ensure_pool()
+        self._update_scrollregion()
+        self._update_visible_items()
 
     def set_thumbnail_size(self, size: int) -> None:
         size = max(48, min(size, 512))
@@ -238,73 +249,225 @@ class ThumbnailView(ttk.Frame):
         self._cache.clear()
         for item in self._items:
             item.update_size(size)
-        self._relayout_items()
-
-    def _relayout_items(self) -> None:
-        for item in self._items:
-            item.grid_forget()
-        for index, item in enumerate(self._items):
-            row = index // self.columns
-            column = index % self.columns
-            item.grid(row=row, column=column, padx=4, pady=4, sticky="nsew")
-        self.after_idle(self._refresh_visible_items)
+        self._row_height = self.thumbnail_size + 48
+        self._visible_row = 0
+        self._needs_rebind = True
+        self._ensure_pool()
+        self._update_scrollregion()
+        self._update_visible_items()
 
     def select_first(self) -> None:
-        if self._items:
-            self._handle_select(self._items[0].entry)
+        if self._entries:
+            self._handle_select(self._entries[0])
         self._update_visible_items()
 
     def _refresh_visible_items(self) -> None:
-        self._update_item_positions()
+        self._needs_rebind = True
+        self._ensure_pool()
         self._update_visible_items()
 
-    def _update_item_positions(self) -> None:
-        try:
-            self.inner.update_idletasks()
-        except tk.TclError:
-            return
-        tops: List[int] = []
-        bottoms: List[int] = []
-        for item in self._items:
-            try:
-                y = item.winfo_y()
-                height = item.winfo_height()
-            except tk.TclError:
-                y = 0
-                height = 0
-            tops.append(int(y))
-            bottoms.append(int(y + height))
-        self._item_tops = tops
-        self._item_bottoms = bottoms
-
     def _update_visible_items(self) -> None:
-        if not self._items:
+        if not self._entries and not self._items:
             return
-        if len(self._item_tops) != len(self._items) or len(self._item_bottoms) != len(self._items):
-            self._update_item_positions()
-        if not self._item_tops or not self._item_bottoms:
-            return
+
+        self._ensure_pool()
+
+        row_height = max(1, self._row_height)
         try:
             canvas_top = self.canvas.canvasy(0)
             canvas_bottom = canvas_top + self.canvas.winfo_height()
         except tk.TclError:
             return
+
+        new_row = max(0, int(canvas_top // row_height))
+        if self._needs_rebind or new_row != self._visible_row:
+            self._rebind_visible_items(new_row)
+            self._needs_rebind = False
+
         margin = max(128, self.thumbnail_size)
         visible_top = canvas_top - margin
         visible_bottom = canvas_bottom + margin
+        self._update_item_thumbnails(visible_top, visible_bottom)
 
-        start_index = bisect_left(self._item_bottoms, int(visible_top))
-        end_index = bisect_right(self._item_tops, int(visible_bottom))
+    def _ensure_pool(self) -> None:
+        current = len(self._items)
+        if not self._entries:
+            required_items = 0
+        else:
+            try:
+                canvas_height = self.canvas.winfo_height()
+            except tk.TclError:
+                canvas_height = 0
+            canvas_height = max(1, canvas_height)
+            row_height = max(1, self._row_height)
+            visible_rows = max(1, ceil(canvas_height / row_height))
+            total_rows = max(1, ceil(len(self._entries) / self.columns))
+            required_rows = min(total_rows, visible_rows + self._buffer_rows)
+            required_rows = max(1, min(total_rows, required_rows))
+            required_items = required_rows * self.columns
 
-        # Ensure widgets that just moved out of the visible margin still run
-        # through the cleanup path once by widening the slice slightly.
-        start_index = max(0, start_index - 1)
-        end_index = min(len(self._items), end_index + 1)
+        if required_items == current:
+            return
 
-        for index in range(start_index, end_index):
-            item = self._items[index]
-            top = self._item_tops[index]
-            bottom = self._item_bottoms[index]
+        if required_items < current:
+            for _ in range(current - required_items):
+                item = self._items.pop()
+                item.destroy()
+                self._item_entries.pop()
+        else:
+            for _ in range(required_items - current):
+                item = ThumbnailItem(
+                    self.inner,
+                    entry=None,
+                    cache=self._cache,
+                    size=self.thumbnail_size,
+                    on_select=self._handle_select,
+                )
+                item.place_forget()
+                self._items.append(item)
+                self._item_entries.append(None)
+
+        self._needs_rebind = True
+
+    def _compute_column_width(self) -> int:
+        width = 0
+        try:
+            width = self.inner.winfo_width()
+        except tk.TclError:
+            width = 0
+        if width <= 1:
+            try:
+                width = self.canvas.winfo_width()
+            except tk.TclError:
+                width = 0
+        if width <= 1:
+            width = self.columns * (self.thumbnail_size + self._horizontal_padding * 2)
+        return max(1, width // max(1, self.columns))
+
+    def _rebind_visible_items(self, start_row: int) -> None:
+        if not self._items:
+            self._visible_row = 0
+            return
+
+        total_entries = len(self._entries)
+        if total_entries == 0:
+            for index, item in enumerate(self._items):
+                item.set_entry(None)
+                item.place_forget()
+                item.current_row = None
+                item.current_entry_index = None
+                if index < len(self._item_entries):
+                    self._item_entries[index] = None
+            self._visible_row = 0
+            self._update_scrollregion()
+            return
+
+        total_rows = max(1, ceil(total_entries / self.columns))
+        pool_rows = max(1, len(self._items) // self.columns)
+        max_row = max(total_rows - pool_rows, 0)
+        start_row = min(max(start_row, 0), max_row)
+        self._visible_row = start_row
+
+        column_width = self._compute_column_width()
+        start_index = start_row * self.columns
+
+        for slot, item in enumerate(self._items):
+            entry_index = start_index + slot
+            if entry_index < total_entries:
+                entry = self._entries[entry_index]
+                item.set_entry(entry)
+                item.set_selected(self._selected_path == entry.path)
+                row_index = start_row + slot // self.columns
+                column_index = slot % self.columns
+                x = column_index * column_width + self._horizontal_padding
+                y = row_index * self._row_height + self._vertical_padding
+                width = column_width - 2 * self._horizontal_padding
+                if width <= 0:
+                    width = column_width
+                item.place(x=x, y=y, width=width)
+                item.current_row = row_index
+                item.current_entry_index = entry_index
+                self._item_entries[slot] = entry_index
+            else:
+                item.set_entry(None)
+                item.place_forget()
+                item.current_row = None
+                item.current_entry_index = None
+                self._item_entries[slot] = None
+
+        self._schedule_measurement()
+
+    def _schedule_measurement(self) -> None:
+        if self._measurement_job is not None:
+            return
+        self._measurement_job = self.after_idle(self._perform_measurement)
+
+    def _perform_measurement(self) -> None:
+        self._measurement_job = None
+        new_height = self._measure_row_height()
+        if new_height != self._row_height:
+            self._row_height = new_height
+            self._needs_rebind = True
+        self._update_scrollregion()
+        if self._needs_rebind:
+            self.after_idle(self._update_visible_items)
+
+    def _measure_row_height(self) -> int:
+        try:
+            self.inner.update_idletasks()
+        except tk.TclError:
+            return max(1, self._row_height)
+
+        height = 0
+        for item in self._items:
+            if not item.winfo_ismapped():
+                continue
+            try:
+                item_height = item.winfo_height()
+            except tk.TclError:
+                item_height = 0
+            if item_height:
+                height = item_height + self._vertical_padding * 2
+                break
+        if not height:
+            for item in self._items:
+                try:
+                    req_height = item.winfo_reqheight()
+                except tk.TclError:
+                    continue
+                if req_height:
+                    height = req_height + self._vertical_padding * 2
+                    break
+
+        if not height:
+            height = self.thumbnail_size + 48
+
+        return max(1, height)
+
+    def _update_scrollregion(self) -> None:
+        total_rows = ceil(len(self._entries) / self.columns) if self._entries else 0
+        total_height = total_rows * self._row_height
+        try:
+            width = self.canvas.winfo_width()
+        except tk.TclError:
+            width = 0
+        if width <= 0:
+            width = self.columns * (self.thumbnail_size + self._horizontal_padding * 2)
+        self.canvas.configure(scrollregion=(0, 0, width, total_height))
+        window_height = max(total_height, self.canvas.winfo_height())
+        try:
+            self.canvas.itemconfigure(self._window_id, height=window_height)
+        except tk.TclError:
+            pass
+
+    def _update_item_thumbnails(self, visible_top: float, visible_bottom: float) -> None:
+        for item, entry_index in zip(self._items, self._item_entries):
+            if entry_index is None:
+                item.clear_thumbnail()
+                continue
+            row_index = entry_index // self.columns
+            top = row_index * self._row_height + self._vertical_padding
+            bottom = top + max(0, self._row_height - 2 * self._vertical_padding)
             if bottom < visible_top or top > visible_bottom:
                 item.clear_thumbnail()
             else:
