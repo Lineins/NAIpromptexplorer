@@ -24,7 +24,7 @@ NAI Prompt Explorer は、PNG ファイルに埋め込まれたプロンプト�
 ```bash
 python -m venv .venv
 source .venv/bin/activate  # Windows の場合は .venv\Scripts\activate
-pip install -r requirements.txt
+pip install -e .
 ```
 
 ## 使い方

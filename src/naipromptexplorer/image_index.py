@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import concurrent.futures
+import os
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional
 
 from PIL import Image
 
@@ -91,15 +93,38 @@ class ImageIndexer:
         self, folder: Path, progress_callback: Optional[ProgressCallback] = None
     ) -> List[ImageEntry]:
         png_files = sorted(folder.glob("*.png"))
-        entries: List[ImageEntry] = []
         total = len(png_files)
-        for index, image_path in enumerate(png_files, start=1):
-            prompt = extract_prompt_text(image_path)
-            entries.append(ImageEntry(path=image_path, prompt=prompt))
-            if progress_callback and index % 25 == 0:
-                progress_callback(index, total)
-        if progress_callback:
-            progress_callback(total, total)
+        if total == 0:
+            if progress_callback:
+                progress_callback(0, 0)
+            with self._lock:
+                self._entries = []
+            return []
+
+        max_workers = min(32, max(4, (os.cpu_count() or 1) * 2))
+        prompts: Dict[Path, str] = {}
+
+        def _load_prompt(image_path: Path) -> tuple[Path, str]:
+            prompt_text = extract_prompt_text(image_path)
+            return image_path, prompt_text
+
+        completed = 0
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_path = {
+                executor.submit(_load_prompt, image_path): image_path for image_path in png_files
+            }
+            for future in concurrent.futures.as_completed(future_to_path):
+                try:
+                    image_path, prompt_text = future.result()
+                except Exception:
+                    image_path = future_to_path[future]
+                    prompt_text = ""
+                prompts[image_path] = prompt_text
+                completed += 1
+                if progress_callback and (completed % 25 == 0 or completed == total):
+                    progress_callback(completed, total)
+
+        entries = [ImageEntry(path=image_path, prompt=prompts.get(image_path, "")) for image_path in png_files]
         with self._lock:
             self._entries = entries
         return entries
