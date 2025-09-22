@@ -137,23 +137,6 @@ class ThumbnailView(ttk.Frame):
             self.canvas.bind(sequence, self._on_mousewheel)
             self.inner.bind(sequence, self._on_mousewheel)
         self._batch_job_id: Optional[str] = None
-        self._visibility_job_id: Optional[str] = None
-
-    def _on_frame_configure(self, _event: tk.Event) -> None:
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-        self._schedule_visible_update()
-
-    def _on_canvas_configure(self, event: tk.Event) -> None:
-        self.canvas.itemconfigure(self._window_id, width=event.width)
-        self._schedule_visible_update()
-
-    def _on_canvas_scroll(self, first: str, last: str) -> None:
-        self.scrollbar.set(first, last)
-        self._schedule_visible_update()
-
-    def _on_scrollbar(self, *args: str) -> None:
-        self.canvas.yview(*args)
-        self._schedule_visible_update()
 
     def _on_mousewheel(self, event: tk.Event) -> None:  # type: ignore[override]
         delta = 0
@@ -165,15 +148,12 @@ class ThumbnailView(ttk.Frame):
             delta = 1
         if delta:
             self.canvas.yview_scroll(delta, "units")
-            self._schedule_visible_update()
 
     def clear(self) -> None:
         if self._batch_job_id is not None:
             self.after_cancel(self._batch_job_id)
             self._batch_job_id = None
-        if self._visibility_job_id is not None:
-            self.after_cancel(self._visibility_job_id)
-            self._visibility_job_id = None
+
         for item in self._items:
             item.clear_thumbnail()
             item.destroy()
@@ -194,7 +174,6 @@ class ThumbnailView(ttk.Frame):
     def _build_next_batch(self, batch_size: int = 24) -> None:
         if not self._pending:
             self._batch_job_id = None
-            self._schedule_visible_update()
             return
         batch_count = min(batch_size, len(self._pending))
         for _ in range(batch_count):
@@ -211,9 +190,7 @@ class ThumbnailView(ttk.Frame):
             column = index % self.columns
             item.grid(row=row, column=column, padx=4, pady=4, sticky="nsew")
             self._items.append(item)
-        start_index = max(0, len(self._items) - batch_count)
-        self._refresh_item_bounds(start_index=start_index)
-        self._schedule_visible_update()
+
         self._batch_job_id = self.after(30, self._build_next_batch)
 
     def _handle_select(self, entry: ImageEntry) -> None:
@@ -231,7 +208,6 @@ class ThumbnailView(ttk.Frame):
             return
         self.columns = columns
         self._relayout_items()
-        self._schedule_visible_update()
 
     def set_thumbnail_size(self, size: int) -> None:
         size = max(48, min(size, 512))
@@ -242,7 +218,6 @@ class ThumbnailView(ttk.Frame):
         for item in self._items:
             item.update_size(size)
         self._relayout_items()
-        self._schedule_visible_update()
 
     def _relayout_items(self) -> None:
         for item in self._items:
@@ -251,48 +226,11 @@ class ThumbnailView(ttk.Frame):
             row = index // self.columns
             column = index % self.columns
             item.grid(row=row, column=column, padx=4, pady=4, sticky="nsew")
-        self._refresh_item_bounds()
-        self._schedule_visible_update()
 
     def select_first(self) -> None:
         if self._items:
             self._handle_select(self._items[0].entry)
 
-    def _refresh_item_bounds(self, start_index: int = 0) -> None:
-        if start_index >= len(self._items):
-            self._item_tops = self._item_tops[: len(self._items)]
-            self._item_bottoms = self._item_bottoms[: len(self._items)]
-            return
-        try:
-            self.inner.update_idletasks()
-        except tk.TclError:
-            return
-        tops = self._item_tops
-        bottoms = self._item_bottoms
-        for index in range(start_index, len(self._items)):
-            item = self._items[index]
-            try:
-                top = item.winfo_y()
-                bottom = top + max(item.winfo_height(), self.thumbnail_size)
-            except tk.TclError:
-                continue
-            if index < len(tops):
-                tops[index] = top
-                bottoms[index] = bottom
-            else:
-                tops.append(top)
-                bottoms.append(bottom)
-        if len(tops) > len(self._items):
-            del tops[len(self._items) :]
-            del bottoms[len(self._items) :]
-
-    def _schedule_visible_update(self) -> None:
-        if self._visibility_job_id is not None:
-            return
-        self._visibility_job_id = self.after_idle(self._update_visible_thumbnails)
-
-    def _update_visible_thumbnails(self) -> None:
-        self._visibility_job_id = None
         if not self._items:
             return
         try:
@@ -301,20 +239,7 @@ class ThumbnailView(ttk.Frame):
         except tk.TclError:
             return
         margin = max(128, self.thumbnail_size)
-        tops = self._item_tops
-        bottoms = self._item_bottoms
-        if len(tops) != len(self._items):
-            self._refresh_item_bounds(0)
-            tops = self._item_tops
-            bottoms = self._item_bottoms
-        if not tops or not bottoms:
-            return
-        lower_bound = canvas_top - margin
-        upper_bound = canvas_bottom + margin
-        start = bisect_left(bottoms, lower_bound)
-        end = bisect_right(tops, upper_bound)
-        for index, item in enumerate(self._items):
-            if start <= index < end:
+
                 item.ensure_thumbnail()
             else:
                 item.clear_thumbnail()
