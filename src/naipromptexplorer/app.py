@@ -106,18 +106,20 @@ class PromptExplorerApp:
         display_frame.pack(fill="x", pady=(6, 0))
 
         ttk.Label(display_frame, text="1列あたり").pack(side="left")
-        columns_scale = ttk.Scale(display_frame, from_=1, to=10, orient="horizontal", command=self._on_columns_scale)
+        self.columns_value_label = ttk.Label(display_frame, text=str(self.columns_var.get()))
+        columns_scale = ttk.Scale(display_frame, from_=1, to=10, orient="horizontal")
         columns_scale.set(self.columns_var.get())
         columns_scale.pack(side="left", padx=4)
-        self.columns_value_label = ttk.Label(display_frame, text=str(self.columns_var.get()))
         self.columns_value_label.pack(side="left")
+        columns_scale.configure(command=self._on_columns_scale)
 
         ttk.Label(display_frame, text="サムネイルサイズ").pack(side="left", padx=(12, 0))
-        size_scale = ttk.Scale(display_frame, from_=64, to=320, orient="horizontal", command=self._on_size_scale)
+        self.size_value_label = ttk.Label(display_frame, text=f"{self.size_var.get()}px")
+        size_scale = ttk.Scale(display_frame, from_=64, to=320, orient="horizontal")
         size_scale.set(self.size_var.get())
         size_scale.pack(side="left", padx=4)
-        self.size_value_label = ttk.Label(display_frame, text=f"{self.size_var.get()}px")
         self.size_value_label.pack(side="left")
+        size_scale.configure(command=self._on_size_scale)
 
     def _build_main_area(self) -> None:
         paned = ttk.Panedwindow(self.root, orient=tk.HORIZONTAL)
@@ -269,6 +271,8 @@ class PromptExplorerApp:
             self.load_folder(Path(selected))
 
     def _on_columns_scale(self, value: str) -> None:
+        if not hasattr(self, "columns_value_label") or not hasattr(self, "thumbnail_view"):
+            return
         columns = max(1, int(float(value)))
         if columns != self.columns_var.get():
             self.columns_var.set(columns)
@@ -276,6 +280,8 @@ class PromptExplorerApp:
         self.thumbnail_view.set_columns(columns)
 
     def _on_size_scale(self, value: str) -> None:
+        if not hasattr(self, "size_value_label") or not hasattr(self, "thumbnail_view"):
+            return
         size = max(64, min(320, int(float(value))))
         if size != self.size_var.get():
             self.size_var.set(size)
