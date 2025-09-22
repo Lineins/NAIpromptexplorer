@@ -296,7 +296,12 @@ class ThumbnailView(ttk.Frame):
         start_index = bisect_left(self._item_bottoms, int(visible_top))
         end_index = bisect_right(self._item_tops, int(visible_bottom))
 
-        for index in range(start_index, min(end_index, len(self._items))):
+        # Ensure widgets that just moved out of the visible margin still run
+        # through the cleanup path once by widening the slice slightly.
+        start_index = max(0, start_index - 1)
+        end_index = min(len(self._items), end_index + 1)
+
+        for index in range(start_index, end_index):
             item = self._items[index]
             top = self._item_tops[index]
             bottom = self._item_bottoms[index]
