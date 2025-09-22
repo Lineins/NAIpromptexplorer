@@ -57,19 +57,22 @@ class ThumbnailItem(ttk.Frame):
         self.size = size
         self.on_select = on_select
         self.selected = False
+        self._has_thumbnail = False
 
         self._image_label = ttk.Label(self)
         self._name_label = ttk.Label(self, text=entry.file_name, wraplength=size, justify="center")
         self._image_label.pack(expand=True, fill="both")
         self._name_label.pack(fill="x")
 
-        self._update_thumbnail()
         self._bind_clicks()
 
-    def _update_thumbnail(self) -> None:
+    def ensure_thumbnail(self) -> None:
+        if self._has_thumbnail:
+            return
         image = self.cache.get(self.entry.path, self.size)
         self._image_label.configure(image=image)
         self._image_label.image = image
+        self._has_thumbnail = True
 
     def _bind_clicks(self) -> None:
         for widget in (self, self._image_label, self._name_label):
@@ -87,7 +90,14 @@ class ThumbnailItem(ttk.Frame):
         if size != self.size:
             self.size = size
             self._name_label.configure(wraplength=size)
-            self._update_thumbnail()
+            self.clear_thumbnail()
+
+    def clear_thumbnail(self) -> None:
+        if not self._has_thumbnail:
+            return
+        self._image_label.configure(image="")
+        self._image_label.image = None
+        self._has_thumbnail = False
 
 
 class ThumbnailView(ttk.Frame):
@@ -109,8 +119,8 @@ class ThumbnailView(ttk.Frame):
         self._selected_path: Optional[Path] = None
 
         self.canvas = tk.Canvas(self, highlightthickness=0)
-        self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
-        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self._on_scrollbar)
+        self.canvas.configure(yscrollcommand=self._on_canvas_scroll)
 
         self.inner = ttk.Frame(self.canvas)
         self._window_id = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
@@ -120,15 +130,45 @@ class ThumbnailView(ttk.Frame):
 
         self.inner.bind("<Configure>", self._on_frame_configure)
         self.canvas.bind("<Configure>", self._on_canvas_configure)
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.canvas.bind(sequence, self._on_mousewheel)
+            self.inner.bind(sequence, self._on_mousewheel)
+        self._batch_job_id: Optional[str] = None
 
     def _on_frame_configure(self, _event: tk.Event) -> None:
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        self._update_visible_thumbnails()
 
     def _on_canvas_configure(self, event: tk.Event) -> None:
         self.canvas.itemconfigure(self._window_id, width=event.width)
+        self._update_visible_thumbnails()
+
+    def _on_canvas_scroll(self, first: str, last: str) -> None:
+        self.scrollbar.set(first, last)
+        self._update_visible_thumbnails()
+
+    def _on_scrollbar(self, *args: str) -> None:
+        self.canvas.yview(*args)
+        self._update_visible_thumbnails()
+
+    def _on_mousewheel(self, event: tk.Event) -> None:  # type: ignore[override]
+        delta = 0
+        if hasattr(event, "delta") and event.delta:
+            delta = -1 if event.delta > 0 else 1
+        elif event.num == 4:
+            delta = -1
+        elif event.num == 5:
+            delta = 1
+        if delta:
+            self.canvas.yview_scroll(delta, "units")
+            self._update_visible_thumbnails()
 
     def clear(self) -> None:
+        if self._batch_job_id is not None:
+            self.after_cancel(self._batch_job_id)
+            self._batch_job_id = None
         for item in self._items:
+            item.clear_thumbnail()
             item.destroy()
         self._items.clear()
         self._pending.clear()
@@ -139,8 +179,13 @@ class ThumbnailView(ttk.Frame):
         self._pending = list(entries)
         self._build_next_batch()
 
+    def clear_cache(self) -> None:
+        self._cache.clear()
+
     def _build_next_batch(self, batch_size: int = 24) -> None:
         if not self._pending:
+            self._batch_job_id = None
+            self._update_visible_thumbnails()
             return
         for _ in range(min(batch_size, len(self._pending))):
             entry = self._pending.pop(0)
@@ -156,12 +201,16 @@ class ThumbnailView(ttk.Frame):
             column = index % self.columns
             item.grid(row=row, column=column, padx=4, pady=4, sticky="nsew")
             self._items.append(item)
-        self.after(10, self._build_next_batch)
+        self._update_visible_thumbnails()
+        self._batch_job_id = self.after(30, self._build_next_batch)
 
     def _handle_select(self, entry: ImageEntry) -> None:
         self._selected_path = entry.path
         for item in self._items:
-            item.set_selected(item.entry.path == entry.path)
+            is_selected = item.entry.path == entry.path
+            item.set_selected(is_selected)
+            if is_selected:
+                item.ensure_thumbnail()
         self.on_select(entry)
 
     def set_columns(self, columns: int) -> None:
@@ -170,6 +219,7 @@ class ThumbnailView(ttk.Frame):
             return
         self.columns = columns
         self._relayout_items()
+        self._update_visible_thumbnails()
 
     def set_thumbnail_size(self, size: int) -> None:
         size = max(48, min(size, 512))
@@ -180,6 +230,7 @@ class ThumbnailView(ttk.Frame):
         for item in self._items:
             item.update_size(size)
         self._relayout_items()
+        self._update_visible_thumbnails()
 
     def _relayout_items(self) -> None:
         for item in self._items:
@@ -188,8 +239,29 @@ class ThumbnailView(ttk.Frame):
             row = index // self.columns
             column = index % self.columns
             item.grid(row=row, column=column, padx=4, pady=4, sticky="nsew")
+        self._update_visible_thumbnails()
 
     def select_first(self) -> None:
         if self._items:
             self._handle_select(self._items[0].entry)
+
+    def _update_visible_thumbnails(self) -> None:
+        if not self._items:
+            return
+        try:
+            canvas_top = self.canvas.canvasy(0)
+            canvas_bottom = canvas_top + self.canvas.winfo_height()
+        except tk.TclError:
+            return
+        margin = max(128, self.thumbnail_size)
+        for item in self._items:
+            try:
+                item_top = item.winfo_y()
+                item_bottom = item_top + max(item.winfo_height(), self.thumbnail_size)
+            except tk.TclError:
+                continue
+            if item_bottom >= canvas_top - margin and item_top <= canvas_bottom + margin:
+                item.ensure_thumbnail()
+            else:
+                item.clear_thumbnail()
 

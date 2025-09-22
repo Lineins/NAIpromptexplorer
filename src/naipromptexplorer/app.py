@@ -168,6 +168,7 @@ class PromptExplorerApp:
         self.current_folder = folder
         self.folder_var.set(str(folder))
         self.status_var.set("インデックスを作成しています...")
+        self.thumbnail_view.clear_cache()
         self.thumbnail_view.clear()
         self.prompt_text.delete("1.0", tk.END)
         self.prompt_title_var.set("プロンプト未選択")
