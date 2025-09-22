@@ -149,6 +149,26 @@ class ThumbnailView(ttk.Frame):
         if delta:
             self.canvas.yview_scroll(delta, "units")
 
+    def _on_scrollbar(self, *args: str) -> None:
+        self.canvas.yview(*args)
+        self._update_visible_items()
+
+    def _on_canvas_scroll(self, *args: str) -> None:
+        self.scrollbar.set(*args)
+        self._update_visible_items()
+
+    def _on_frame_configure(self, _event: tk.Event) -> None:  # type: ignore[override]
+        bbox = self.canvas.bbox(self._window_id)
+        if bbox is not None:
+            self.canvas.configure(scrollregion=bbox)
+        self._update_item_positions()
+        self._update_visible_items()
+
+    def _on_canvas_configure(self, event: tk.Event) -> None:  # type: ignore[override]
+        self.canvas.itemconfigure(self._window_id, width=event.width)
+        self._update_item_positions()
+        self._update_visible_items()
+
     def clear(self) -> None:
         if self._batch_job_id is not None:
             self.after_cancel(self._batch_job_id)
@@ -192,6 +212,7 @@ class ThumbnailView(ttk.Frame):
             self._items.append(item)
 
         self._batch_job_id = self.after(30, self._build_next_batch)
+        self.after_idle(self._refresh_visible_items)
 
     def _handle_select(self, entry: ImageEntry) -> None:
         self._selected_path = entry.path
@@ -226,12 +247,42 @@ class ThumbnailView(ttk.Frame):
             row = index // self.columns
             column = index % self.columns
             item.grid(row=row, column=column, padx=4, pady=4, sticky="nsew")
+        self.after_idle(self._refresh_visible_items)
 
     def select_first(self) -> None:
         if self._items:
             self._handle_select(self._items[0].entry)
+        self._update_visible_items()
 
+    def _refresh_visible_items(self) -> None:
+        self._update_item_positions()
+        self._update_visible_items()
+
+    def _update_item_positions(self) -> None:
+        try:
+            self.inner.update_idletasks()
+        except tk.TclError:
+            return
+        tops: List[int] = []
+        bottoms: List[int] = []
+        for item in self._items:
+            try:
+                y = item.winfo_y()
+                height = item.winfo_height()
+            except tk.TclError:
+                y = 0
+                height = 0
+            tops.append(int(y))
+            bottoms.append(int(y + height))
+        self._item_tops = tops
+        self._item_bottoms = bottoms
+
+    def _update_visible_items(self) -> None:
         if not self._items:
+            return
+        if len(self._item_tops) != len(self._items) or len(self._item_bottoms) != len(self._items):
+            self._update_item_positions()
+        if not self._item_tops or not self._item_bottoms:
             return
         try:
             canvas_top = self.canvas.canvasy(0)
