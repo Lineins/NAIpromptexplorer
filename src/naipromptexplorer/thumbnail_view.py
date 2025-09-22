@@ -290,8 +290,17 @@ class ThumbnailView(ttk.Frame):
         except tk.TclError:
             return
         margin = max(128, self.thumbnail_size)
-        for item, top, bottom in zip(self._items, self._item_tops, self._item_bottoms):
-            if bottom < canvas_top - margin or top > canvas_bottom + margin:
+        visible_top = canvas_top - margin
+        visible_bottom = canvas_bottom + margin
+
+        start_index = bisect_left(self._item_bottoms, int(visible_top))
+        end_index = bisect_right(self._item_tops, int(visible_bottom))
+
+        for index in range(start_index, min(end_index, len(self._items))):
+            item = self._items[index]
+            top = self._item_tops[index]
+            bottom = self._item_bottoms[index]
+            if bottom < visible_top or top > visible_bottom:
                 item.clear_thumbnail()
             else:
                 item.ensure_thumbnail()
