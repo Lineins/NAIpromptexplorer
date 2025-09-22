@@ -239,8 +239,9 @@ class ThumbnailView(ttk.Frame):
         except tk.TclError:
             return
         margin = max(128, self.thumbnail_size)
-
-                item.ensure_thumbnail()
-            else:
+        for item, top, bottom in zip(self._items, self._item_tops, self._item_bottoms):
+            if bottom < canvas_top - margin or top > canvas_bottom + margin:
                 item.clear_thumbnail()
+            else:
+                item.ensure_thumbnail()
 
